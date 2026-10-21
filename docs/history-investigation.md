@@ -31,4 +31,9 @@ Frontend corrections in index.html:
 
 Validation: existing regression browser checks passed. Separately extracted archived daily records from the real XLSX files, mapped them into the documented API fields, and exercised both rooms for June–September in Chromium. Verified 21 daily records per room in June–August, 24 Prepare and 23 Assembly records in September, exact per-day hours, preserved missing values, visible tables and no JavaScript page errors. This validates the frontend against workbook values; it does not validate the live Apps Script's extraction or response.
 
-Follow-up: inspected the Apps Script supplied on 2026-10-21. Its doGet ignored month parameters, read Daily Record only, never read History, and returned realtimePrepare/realtimeAssembly instead of prepare/assembly. Added the corrected source as apps-script/Code.gs and deployment instructions as apps-script/DEPLOY.md. Node VM tests exercise the Apps Script with synthetic and real XLSX-backed sheet mocks; browser integration tests exercise its actual response through the frontend. Live Apps Script deployment and Google authorization remain outstanding. No live Google Sheet writes or Google deployment has been performed.
+
+## Correction after the current Apps Script was supplied
+
+The user clarified that the earlier small v4/v5 source was the wrong file. The corrected baseline is the subsequently supplied 6,775-line combined script. The earlier backend diagnosis applies only to that incorrect file and is superseded here.
+
+The actual current backend already has routing, authentication, writes, version polling and month parameters. Its production resolver checks only `ProductionHistoryService.readMonthRoom` (the separate imported-data sheet) before falling back to the live Daily Record. It never consults the legacy per-room History sheets during dashboard assembly. The current patch adds that missing read path, sends the legacy snapshots to the frontend, and prevents cross-month live fallback. CONFIG, Router_ and doPost are preserved verbatim. No hardcoded spreadsheet ID is introduced. See apps-script/DEPLOY.md for the corrected deployment steps.
