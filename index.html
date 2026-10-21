@@ -3134,6 +3134,10 @@ function generateRoomIoDailyData(roomKey, monthIdx) {
   rows.forEach(function(r) {
     var day = Number(r.day);
     if (!Number.isInteger(day) || day < 1 || day > new Date(Number(key.slice(0,4)), monthIdx + 1, 0).getDate()) return;
+    // Ignore unfilled calendar-day rows, but preserve a measured zero.
+    var hasInput = r.actualHrs !== null && r.actualHrs !== undefined && r.actualHrs !== '';
+    var hasOutput = r.stdHrs !== null && r.stdHrs !== undefined && r.stdHrs !== '';
+    if (!hasInput && !hasOutput) return;
     if (!map[day]) map[day] = { input: 0, output: 0, inputMissing: false, outputMissing: false };
     var d = map[day];
     [['actualHrs','input'],['stdHrs','output']].forEach(function(pair) {

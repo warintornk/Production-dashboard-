@@ -5514,6 +5514,27 @@ function _buildFullPayload(params, selMonth) {
       if (!out.productionDailyHistory[key]) out.productionDailyHistory[key] = {};
       out.productionDailyHistory[key][room.id] = snapshots[key];
     });
+    // Include the room's current month even when the user is viewing history.
+    // Keep archived/imported snapshots authoritative when already available.
+    var currentMonth = null;
+    try { currentMonth = HistoryService.readDailyMonth(room.id); } catch(e) { /* no active month */ }
+    if (currentMonth) {
+      var currentKey = Util_.monthKey(Util_.monthLabelTh(currentMonth.monthIdx,currentMonth.year));
+      var currentRows = section('current_daily_' + room.id,function(){
+        return DashboardService.readDailyRoom(room.id);
+      },{rows:[]});
+      var hasCurrentHours = (currentRows.rows || []).some(function(row){
+        return row.actualHrs !== null && row.actualHrs !== undefined || row.stdHrs !== null && row.stdHrs !== undefined;
+      });
+      if (hasCurrentHours) {
+        if (!out.productionDailyHistory[currentKey]) out.productionDailyHistory[currentKey] = {};
+        if (!out.productionDailyHistory[currentKey][room.id]) {
+          out.productionDailyHistory[currentKey][room.id] = {
+            rows:currentRows.rows,monthKey:currentKey,room:room.id,source:'daily'
+          };
+        }
+      }
+    }
     out[room.id] = section('daily_' + room.id, function(){
       if (selKey) {
         // Keep the existing imported-archive priority, then consult the legacy sheets.
