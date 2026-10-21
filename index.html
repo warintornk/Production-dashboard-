@@ -2301,9 +2301,7 @@ function applyGsheetData(data) {
     applyProductionEfficiencyFromSheet(data.productionEfficiency.months);
   }
   // Training Plan -> replace TRAINING_RECORDS + TRAINING summary entirely with Sheet data
-  if (data.trainingPlan) {
-    applyTrainingPlanFromSheet(data.trainingPlan);
-  }
+  applyTrainingPlanFromSheet(data.trainingPlan || {});
   // OT Monthly History -> replace OT_MONTHLY_HISTORY (used for the monthly OT drill-down view)
   if (data.otHistory && data.otHistory.months && data.otHistory.months.length) {
     OT_MONTHLY_HISTORY = data.otHistory.months;
@@ -2810,6 +2808,13 @@ function applyProductionEfficiencyFromSheet(months) {
 // TRAINING PLAN — map Sheet's 5 sections onto TRAINING_RECORDS + TRAINING
 // ============================================================
 function applyTrainingPlanFromSheet(tp) {
+  tp = tp || {};
+  TRAINING_COURSES = Array.isArray(tp.courses) ? tp.courses.slice() : [];
+  TRAINING_YEAR = tp.year || null;
+  TRAINING.upcoming = [];
+  TRAINING.mandatory = null;
+  TRAINING.deptProgress = [];
+  TRAINING.planned = TRAINING.completed = TRAINING.remaining = TRAINING.completionPct = 0;
   // Sections 2+3 (per-employee assigned training) -> TRAINING_RECORDS
   // Normalize field names: Sheet uses courseTh/courseEn, dashboard's existing records use th/course
   TRAINING_RECORDS = (tp.assigned || []).map(function(r){
@@ -3283,6 +3288,8 @@ var SKILL_EMPLOYEES = { prepare: [], assembly: [] };
 // `trainingPlan.assigned` section provides one; until then the Training
 // Calendar renders an explicit empty state rather than fiction.
 var TRAINING_RECORDS = [];
+var TRAINING_COURSES = [];
+var TRAINING_YEAR = null;
 
 // ---- Annual training plan ----
 // EMPTIED (Training audit): every value here was a demo constant. The
@@ -5116,6 +5123,7 @@ var skillHeatmapView = 'prepare'; // 'prepare' | 'assembly'
 var SKILL_STATIONS_REAL = { prepare: null, assembly: null, summary: null };
 
 function applySkillStationsFromSheet(s) {
+  SKILL_STATIONS_REAL = {prepare:null,assembly:null,summary:null};
   if (!s) return false;
   var any = false;
   ['prepare','assembly'].forEach(function(k){
@@ -5152,8 +5160,9 @@ function renderSkillHeatmapRow() {
 }
 
 function renderStationCoverageRow() {
-  // No data -> render NOTHING. Never an empty card.
-  if (!hasStationCoverage()) return '';
+  if (!hasStationCoverage()) {
+    return '<div class="card">'+cardHead(t('stationCoverageTitle'))+'<p style="font-size:12px;color:'+P.textSecondary+';">'+esc(currentLang==='th'?'ยังไม่ได้รับข้อมูลจากชีต Skill Matrix ตรวจสอบการเชื่อมต่อ Google Sheets และเวอร์ชัน Apps Script แล้วกดโหลดใหม่':'No Skill Matrix data received. Check the Google Sheets connection and Apps Script version, then reload.')+'</p><button class="io-period-btn" data-refresh-people>'+esc(currentLang==='th'?'โหลดข้อมูลใหม่':'Reload data')+'</button></div>';
+  }
 
   var html = rowHead('PEOPLE DEVELOPMENT', 'stationCoverageTitle', 'stationCoverageTitle');
   html += '<div class="card hoverable" style="padding:0;overflow:hidden;">';
@@ -5249,10 +5258,10 @@ function renderTrainingRow() {
                            (TRAINING.upcoming && TRAINING.upcoming.length) ||
                            TRAINING.mandatory ||
                            (TRAINING.deptProgress && TRAINING.deptProgress.length) ||
-                           TRAINING_RECORDS.length);
+                           TRAINING_RECORDS.length || TRAINING_COURSES.length);
   var trainTag = hasLiveTraining
     ? { label: currentLang==='th'?'✓ ข้อมูลจริง':'✓ Real Data', color:P.success, bg:P.successBg }
-    : { label: currentLang==='th'?'★ ตัวอย่าง':'★ Demo',        color:P.warning, bg:P.warningBg };
+    : { label: currentLang==='th'?'ยังไม่มีข้อมูล':'No data', color:P.warning, bg:P.warningBg };
   var html = rowHead('PEOPLE DEVELOPMENT', 'trainingMgmtDashboard', 'trainingMgmtDashboard', trainTag);
 
   var emptyMsg = currentLang==='th'
@@ -5266,7 +5275,7 @@ function renderTrainingRow() {
 
   // Donut + list
   html += '<div class="card hoverable">';
-  html += cardHead(t('annualTrainingPlan')+' 2026', currentLang==='th'?'แผนการอบรมประจำปี':null);
+  html += cardHead(t('annualTrainingPlan')+(TRAINING_YEAR?' '+TRAINING_YEAR:''), currentLang==='th'?'แผนการอบรมประจำปี':null);
   html += '<div class="donut-center-wrap">'+buildDonutChart({ data:[{l:'done',v:TRAINING.completed},{l:'left',v:TRAINING.remaining}], valueKey:"v", labelKey:"l", size:130, colorFn:function(d,i){return i===0?P.success:P.bgAlt;}, centerLabel:t('completed'), centerValue:TRAINING.completionPct+'%' })+'</div>';
   html += '<div style="margin-top:10px;">';
   html += '<div class="training-list-item"><span class="training-list-label">'+esc(t('plannedCourses'))+'</span><span class="training-list-val">'+TRAINING.planned+'</span></div>';
@@ -5310,6 +5319,8 @@ function renderTrainingRow() {
 
   html += '</div>'; // training-grid
 
+  html += renderTrainingCourseTable();
+
   // Training Calendar (individual records)
   html += '<div class="card hoverable">';
   html += cardHead(t('trainingCalendar'), null);
@@ -5337,6 +5348,25 @@ function renderTrainingRow() {
   html += renderTrainingSkillLink();
 
   return html;
+}
+
+function renderTrainingCourseTable() {
+  var html = '<div class="card" id="training-course-list">'+cardHead(currentLang==='th'?'รายการหลักสูตรและแผนอบรมรายเดือน':'Courses and monthly training plan');
+  if (!TRAINING_COURSES.length) {
+    return html+'<p style="font-size:12px;color:'+P.textSecondary+';">'+esc(currentLang==='th'?'ยังไม่ได้รับรายการหลักสูตรจาก Training Plan กรุณาตรวจสอบการเชื่อมต่อและโหลดข้อมูลใหม่':'No courses received from Training Plan. Check the connection and reload.')+'</p><button class="io-period-btn" data-refresh-people>'+esc(currentLang==='th'?'โหลดข้อมูลใหม่':'Reload data')+'</button></div>';
+  }
+  var hasMonths = TRAINING_COURSES.some(function(c){return Array.isArray(c.months) && c.months.length;});
+  html += '<div class="status-table-wrap"><table class="status-table"><thead><tr>';
+  [currentLang==='th'?'ลำดับ':'No.',currentLang==='th'?'หลักสูตร':'Course',currentLang==='th'?'ประเภท':'Category',currentLang==='th'?'กลุ่มเป้าหมาย':'Audience',currentLang==='th'?'ผู้รับผิดชอบ':'Owner',currentLang==='th'?'สถานะ':'Status'].forEach(function(label){html+='<th>'+esc(label)+'</th>';});
+  if (hasMonths) (currentLang==='th'?MONTHS_TH_SHORT:MONTHS_EN_SHORT).forEach(function(label){html+='<th>'+esc(label)+'</th>';});
+  html += '</tr></thead><tbody>';
+  TRAINING_COURSES.forEach(function(c,i){
+    html += '<tr>';
+    [c.no==null?i+1:c.no,currentLang==='th'?(c.titleTh||c.titleEn):(c.titleEn||c.titleTh),c.category,c.target,c.owner,c.status].forEach(function(value){html+='<td>'+esc(value==null?'—':String(value))+'</td>';});
+    if (hasMonths) for(var m=0;m<12;m++) html+='<td style="text-align:center;">'+esc(c.months && c.months[m] ? String(c.months[m]) : '—')+'</td>';
+    html += '</tr>';
+  });
+  return html+'</tbody></table></div></div>';
 }
 
 // ---- 4. Training Link to Skill Matrix ----
@@ -6039,6 +6069,12 @@ function renderSettingsPage() {
 }
 
 function attachContentHandlers() {
+  document.querySelectorAll('[data-refresh-people]').forEach(function(button){
+    button.addEventListener('click',function(){
+      if (!gsheetUrl) { currentPage='settings'; renderSidebar(); renderContent(); return; }
+      syncFromGsheet(null,{force:true});
+    });
+  });
   document.querySelectorAll('[data-trend-range]').forEach(function(btn){
     btn.addEventListener('click', function(){
       var key=btn.getAttribute('data-trend-key'), range=btn.getAttribute('data-trend-range');

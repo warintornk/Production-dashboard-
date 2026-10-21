@@ -360,7 +360,7 @@ var CONFIG = (function () {
         // Skill Matrix is ONE sheet; rooms are row blocks within it.
         // ANALYSIS §3 A2: v4 looked for two sheets that never existed.
         // Verified: Prepare stations occupy rows 34..45, header at 33.
-        skillRange: { headerRow: 33, startRow: 34, endRow: 45 },
+        skillRange: { headerRow: 33, startRow: 34, endRow: 46 },
         skillSummaryRow: 13,        // "Prepare Room" in ROOM SUMMARY
         otColumn:   3               // 1-based col in OT History (C)
       },
@@ -3235,6 +3235,10 @@ var TrainingService = (function () {
       var numRows = L.endRow - L.startRow + 1;
       var raw = Util_.readTable('training', L.headerRow, L.startRow, numRows, L.columns);
 
+      var monthlyPlan = sh.getRange(L.startRow,8,numRows,12).getValues();
+      var yearMatch = String(sh.getRange(1,1).getValue() || '').match(/20\d{2}/);
+      var planYear = yearMatch ? Number(yearMatch[0]) : null;
+
       var courses = raw
         .filter(function (r) { return r.titleTh; })
         .map(function (r) {
@@ -3247,7 +3251,8 @@ var TrainingService = (function () {
             target:   r.target,
             owner:    r.owner,
             status:   r.status,
-            note:     r.note
+            note:     r.note,
+            months: (monthlyPlan[r._row-L.startRow] || []).map(function(value){return Util_.toStr(value);})
           };
         });
 
@@ -3338,6 +3343,7 @@ var TrainingService = (function () {
 
       return {
         courses:      courses,
+        year:         planYear,
         summary:      summary,
         upcoming:     upcoming,
         mandatory:    mandatory,
