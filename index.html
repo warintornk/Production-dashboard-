@@ -1712,6 +1712,12 @@ function stateSetMonth(monthKey) {
   DASHBOARD_STATE.selectedMonth = monthKey;
   var y = parseInt(String(monthKey).slice(0, 4), 10);
   DASHBOARD_STATE.selectedYear = isNaN(y) ? null : y;
+  // A global month change also updates an open daily drill-down.
+  if (typeof ioChartView !== 'undefined') {
+    Object.keys(ioChartView).forEach(function(room){
+      if (ioChartView[room].mode === 'month') ioChartView[room].monthIdx = parseInt(String(monthKey).slice(5), 10) - 1;
+    });
+  }
 }
 
 // ============================================================
@@ -1760,6 +1766,7 @@ function availableMonths() {
   (NG_COST_RATE || []).forEach(function(r){ if (r && r.monthKey) set[r.monthKey] = true; });
   Object.keys(ngStore     || {}).forEach(function(k){ set[k] = true; });
   Object.keys(monthlyStore || {}).forEach(function(k){ set[k] = true; });
+  Object.keys(PRODUCTION_DAILY_CACHE || {}).forEach(function(k){ set[k] = true; });
   return Object.keys(set).sort();
 }
 
@@ -1808,6 +1815,19 @@ function selectMonth(key) {
 }
 
 
+
+var PRODUCTION_DAILY_MONTH = null;
+var PRODUCTION_DAILY_CACHE = {}; // Exact year-month snapshots returned by the API.
+function productionMonthKey(value) {
+  var v = String(value || '');
+  if (/^\d{4}-\d{2}$/.test(v)) return v;
+  if (/^\d{2}-\d{4}$/.test(v)) return v.slice(3) + '-' + v.slice(0, 2);
+  return null;
+}
+function productionViewMonth(monthIdx) {
+  var y = DASHBOARD_STATE.selectedYear || new Date().getFullYear();
+  return y + '-' + ('0' + (monthIdx + 1)).slice(-2);
+}
 
 var GSHEET_RAW_DAILY_ROWS = { prepare: [], assembly: [] }; // raw daily rows kept for OT weekly bucketing
 
@@ -1999,6 +2019,7 @@ function syncFromGsheet(onDone, opts) {
   //                every cached entry. Reserved for explicit user action
   //                (Sync button, retry) and post-write refreshes.
   if (!opts.force && !opts.fresh && _cache.data &&
+      (!DASHBOARD_STATE.selectedMonth || productionMonthKey(_serverMonth) === DASHBOARD_STATE.selectedMonth) &&
       (Date.now() - _cache.at) < DATA_LAYER.cacheTtlMs) {
     applyGsheetData(_cache.data);
     if (onDone) onDone(true, null, { cached: true });
@@ -2008,6 +2029,7 @@ function syncFromGsheet(onDone, opts) {
   // De-dupe: a click during a background refresh joins that request.
   if (_inflight) { _inflight.then(function(r){ if (onDone) onDone(r.ok, r.err); }); return; }
 
+  var requestedMonth = DASHBOARD_STATE.selectedMonth;
   var isFirst = !_cache.data;
   setLoadState(isFirst ? 'loading' : 'refreshing', { attempt: 0, error: null });
   gsheetStatus.syncing = true;
@@ -2052,6 +2074,11 @@ function syncFromGsheet(onDone, opts) {
   }
 
   _inflight = attempt(0).then(function(json){
+    if (requestedMonth !== DASHBOARD_STATE.selectedMonth) {
+      _inflight = null;
+      syncFromGsheet(onDone, { fresh: true });
+      return { ok: false, err: 'month_changed' };
+    }
     _cache.data = json.data;
     _cache.at   = Date.now();
     DASHBOARD_STATE.lastSyncTime = new Date().toISOString();
@@ -2223,7 +2250,26 @@ function applyGsheetData(data) {
   // the selector. aggregateGsheetDailyRows() returns every field the widgets
   // read, so Object.assign fully refreshes them per month (no stale carryover).
   if (sheetMayWrite('production')) {
-  if (data.prepare && data.prepare.rows && data.prepare.rows.length) {
+  if (data.productionDailyHistory && typeof data.productionDailyHistory === 'object') {
+    PRODUCTION_DAILY_CACHE = {};
+    Object.keys(data.productionDailyHistory).forEach(function(key){
+      var snapshot = data.productionDailyHistory[key];
+      if (!/^\d{4}-\d{2}$/.test(key) || !snapshot) return;
+      PRODUCTION_DAILY_CACHE[key] = {
+        prepare: snapshot.prepare && Array.isArray(snapshot.prepare.rows) ? snapshot.prepare.rows : [],
+        assembly: snapshot.assembly && Array.isArray(snapshot.assembly.rows) ? snapshot.assembly.rows : []
+      };
+    });
+  }
+  PRODUCTION_DAILY_MONTH = productionMonthKey(data._meta && data._meta.selectedMonth) || DASHBOARD_STATE.selectedMonth || productionViewMonth(new Date().getMonth());
+  GSHEET_RAW_DAILY_ROWS.prepare = [];
+  GSHEET_RAW_DAILY_ROWS.assembly = [];
+  ROOM_IO_FROM_DAILY = { prepare: null, assembly: null };
+  Object.assign(PREPARE_ROOM, aggregateGsheetDailyRows([]));
+  Object.assign(ASSEMBLY_ROOM, aggregateGsheetDailyRows([]));
+  TODAY_PRODUCTION.prepare = {plan:0,actual:0};
+  TODAY_PRODUCTION.assembly = {plan:0,actual:0};
+  if (data.prepare && Array.isArray(data.prepare.rows)) {
     var prepResult = aggregateGsheetDailyRows(data.prepare.rows);
     Object.assign(PREPARE_ROOM, prepResult);
     GSHEET_RAW_DAILY_ROWS.prepare = data.prepare.rows;
@@ -2231,7 +2277,7 @@ function applyGsheetData(data) {
     var lastPrepRow = data.prepare.rows[data.prepare.rows.length - 1];
     if (lastPrepRow) TODAY_PRODUCTION.prepare = { plan: lastPrepRow.plan || 0, actual: lastPrepRow.actual || 0 };
   }
-  if (data.assembly && data.assembly.rows && data.assembly.rows.length) {
+  if (data.assembly && Array.isArray(data.assembly.rows)) {
     var asmResult = aggregateGsheetDailyRows(data.assembly.rows);
     Object.assign(ASSEMBLY_ROOM, asmResult);
     GSHEET_RAW_DAILY_ROWS.assembly = data.assembly.rows;
@@ -2239,6 +2285,7 @@ function applyGsheetData(data) {
     var lastAsmRow = data.assembly.rows[data.assembly.rows.length - 1];
     if (lastAsmRow) TODAY_PRODUCTION.assembly = { plan: lastAsmRow.plan || 0, actual: lastAsmRow.actual || 0 };
   }
+  PRODUCTION_DAILY_CACHE[PRODUCTION_DAILY_MONTH] = { prepare: GSHEET_RAW_DAILY_ROWS.prepare.slice(), assembly: GSHEET_RAW_DAILY_ROWS.assembly.slice() };
   }
   // Skill Matrix -> replace SKILL_STATIONS / SKILL_EMPLOYEES per room
   if (data.skillPrepare && data.skillPrepare.employees && data.skillPrepare.employees.length) {
@@ -2732,7 +2779,7 @@ function applyProductionEfficiencyFromSheet(months) {
 
   if (hasDaily) {
     var now = new Date();
-    var mi = now.getMonth(); // 0=Jan..11=Dec
+    var mi = PRODUCTION_DAILY_MONTH ? parseInt(PRODUCTION_DAILY_MONTH.slice(5), 10) - 1 : now.getMonth();
     totalInput[mi]  = Math.round(sumStd    * 10) / 10;
     totalOutput[mi] = Math.round(sumActual * 10) / 10;
     isReal[mi] = true;
@@ -2748,6 +2795,7 @@ function applyProductionEfficiencyFromSheet(months) {
     }
     ROOM_IO_FROM_DAILY.prepare  = roomHrs(prepRows);
     ROOM_IO_FROM_DAILY.assembly = roomHrs(asmRows);
+    ROOM_IO_FROM_DAILY.monthKey = PRODUCTION_DAILY_MONTH;
     ROOM_IO_FROM_DAILY.monthIdx = mi; // which month index has the per-room data
   }
 
@@ -3028,13 +3076,16 @@ var FACTORY_EFFICIENCY_REAL = {
 var ROOM_EFFICIENCY_MONTHLY = { prepare: [], assembly: [] };  // from sheet
 
 function getMonthData(monthIdx, roomKey) {
+  var historicalDaily = generateRoomIoDailyData(roomKey, monthIdx);
+  var completeDays = historicalDaily.filter(function(d) { return d.input !== null && d.output !== null; });
+  if (completeDays.length && completeDays.length === historicalDaily.length) return { input: completeDays.reduce(function(n,d){return n+d.input;},0), output: completeDays.reduce(function(n,d){return n+d.output;},0) };
   if (roomKey === 'factory') {
     var fi = FACTORY_EFFICIENCY_REAL.totalInput[monthIdx];
     var fo = FACTORY_EFFICIENCY_REAL.totalOutput[monthIdx];
     return (fi === null || fo === null) ? null : { input: fi, output: fo };
   }
   // Current month, derived from the room's own Daily Record.
-  if (ROOM_IO_FROM_DAILY[roomKey] && ROOM_IO_FROM_DAILY.monthIdx === monthIdx) {
+  if (ROOM_IO_FROM_DAILY[roomKey] && ROOM_IO_FROM_DAILY.monthKey === productionViewMonth(monthIdx)) {
     return ROOM_IO_FROM_DAILY[roomKey];
   }
   // Historical months, from the Efficiency sheet's per-room blocks.
@@ -3069,68 +3120,27 @@ function generateRoomIoData(roomKey) {
 }
 
 function generateRoomIoDailyData(roomKey, monthIdx) {
-  var now = new Date();
-  var isCurrentMonth = (monthIdx === now.getMonth());
-
-  if (isCurrentMonth) {
-    var prepRows = GSHEET_RAW_DAILY_ROWS.prepare  || [];
-    var asmRows  = GSHEET_RAW_DAILY_ROWS.assembly || [];
-
-    // For factory: merge prepare + assembly by day
-    if (roomKey === 'factory' && (prepRows.length || asmRows.length)) {
-      var dayMap = {};
-      function mergeRow(r) {
-        if (!r.day) return;
-        if (!dayMap[r.day]) dayMap[r.day] = { input:0, output:0 };
-        dayMap[r.day].input  += (r.actualHrs !== null && r.actualHrs !== undefined) ? r.actualHrs : 0;
-        dayMap[r.day].output += (r.stdHrs    !== null && r.stdHrs    !== undefined) ? r.stdHrs    : 0;
-      }
-      prepRows.forEach(mergeRow);
-      asmRows.forEach(mergeRow);
-      var days = Object.keys(dayMap).map(Number).sort(function(a,b){return a-b;});
-      return days.map(function(d) {
-        var inp = Math.round(dayMap[d].input  * 10) / 10;
-        var out = Math.round(dayMap[d].output * 10) / 10;
-        return { label: String(d), day: d, input: inp, output: out, eff: inp > 0 ? Math.round((out/inp)*1000)/10 : 0 };
-      });
-    }
-
-    // For prepare or assembly: use that room's real rows directly
-    var rows = roomKey === 'prepare' ? prepRows : asmRows;
-    if (rows.length) {
-      var daily = [];
-      rows.forEach(function(r) {
-        if (!r.day || (r.stdHrs === null && r.actualHrs === null)) return;
-        var input  = (r.actualHrs !== null && r.actualHrs !== undefined) ? Math.round(r.actualHrs * 10) / 10 : 0;
-        var output = (r.stdHrs    !== null && r.stdHrs    !== undefined) ? Math.round(r.stdHrs    * 10) / 10 : 0;
-        daily.push({ label: String(r.day), day: r.day, input: input, output: output, eff: input  > 0 ? Math.round((output/input)*1000)/10 : 0 });
-      });
-      daily.sort(function(a,b){return a.day - b.day;});
-      return daily;
-    }
-  }
-
-  // Other months (historical) or no data — distribute month total across weekdays
-  var daysInMonth = new Date(2026, monthIdx + 1, 0).getDate();
-  var weekdays = [];
-  for (var d = 1; d <= daysInMonth; d++) {
-    var dow = new Date(2026, monthIdx, d).getDay();
-    if (dow !== 0 && dow !== 6) weekdays.push(d);
-  }
-  // PHASE 4: the synthetic daily generator here has been REMOVED.
-  // It took a monthly total, divided it across weekdays, then added
-  // Math.sin() "noise" so the bars looked like genuine day-to-day
-  // variation. It was a drawing of data, not data.
-  //
-  // Real daily numbers exist only for the CURRENT month (Daily Record),
-  // which is handled above. For any other month we have monthly totals
-  // and nothing finer, so return empty and let the caller show the
-  // no-data state.
-  var split = getMonthData(monthIdx, roomKey);
-  if (!split || !split.input) {
-    return weekdays.map(function(d) { return { label: String(d), day: d, input: null, output: null, eff: null }; });
-  }
-  return weekdays.map(function(d) { return { label: String(d), day: d, input: null, output: null, eff: null }; });
+  var key = productionViewMonth(monthIdx);
+  var snapshot = PRODUCTION_DAILY_CACHE[key];
+  if (!snapshot && PRODUCTION_DAILY_MONTH === key) snapshot = GSHEET_RAW_DAILY_ROWS;
+  if (!snapshot) return [];
+  var rows = roomKey === 'factory' ? (snapshot.prepare || []).concat(snapshot.assembly || []) : (snapshot[roomKey] || []);
+  var map = {};
+  rows.forEach(function(r) {
+    var day = Number(r.day);
+    if (!Number.isInteger(day) || day < 1 || day > new Date(Number(key.slice(0,4)), monthIdx + 1, 0).getDate()) return;
+    if (!map[day]) map[day] = { input: 0, output: 0, inputMissing: false, outputMissing: false };
+    var d = map[day];
+    [['actualHrs','input'],['stdHrs','output']].forEach(function(pair) {
+      var value = r[pair[0]];
+      if (value === null || value === undefined || value === '' || !Number.isFinite(Number(value))) d[pair[1] + 'Missing'] = true;
+      else d[pair[1]] += Number(value);
+    });
+  });
+  return Object.keys(map).map(Number).sort(function(a,b){return a-b;}).map(function(day) {
+    var d = map[day], input = d.inputMissing ? null : d.input, output = d.outputMissing ? null : d.output;
+    return { label: String(day), day: day, input: input, output: output, eff: input > 0 && output !== null ? Math.round(output/input*1000)/10 : null };
+  });
 }
 
 var TREND_30D = buildTrend30D();
@@ -3972,6 +3982,9 @@ function renderKpiRow() {
 }
 
 function buildPrepareRoomCard() {
+  if (PRODUCTION_DAILY_MONTH && !GSHEET_RAW_DAILY_ROWS.prepare.length) {
+    return '<div class="room-card"><div class="room-body">' + esc(t('prepareRoom')) + ' · ' + esc(monthKeyLabel(PRODUCTION_DAILY_MONTH)) + renderNoData('noEffData') + '</div></div>';
+  }
   var pr = PREPARE_ROOM, prPct = Math.round((pr.actual/pr.plan)*100);
   var html = '<div class="room-card"><div class="room-card-header prep">';
   html += '<div class="room-num-badge">1</div><div class="room-name-group"><div class="room-name">'+esc(t('prepareRoom').toUpperCase())+'</div><div class="room-name-sub">'+esc(currentLang==='th'?'ห้องเตรียมงาน':'Prepare Room')+'</div></div></div>';
@@ -4000,6 +4013,9 @@ function buildPrepareRoomCard() {
 }
 
 function buildAssemblyRoomCard() {
+  if (PRODUCTION_DAILY_MONTH && !GSHEET_RAW_DAILY_ROWS.assembly.length) {
+    return '<div class="room-card"><div class="room-body">' + esc(t('assemblyRoom')) + ' · ' + esc(monthKeyLabel(PRODUCTION_DAILY_MONTH)) + renderNoData('noEffData') + '</div></div>';
+  }
   var as = ASSEMBLY_ROOM, asPct = Math.round((as.actual/as.plan)*100);
   var html = '<div class="room-card"><div class="room-card-header asm">';
   html += '<div class="room-num-badge">2</div><div class="room-name-group"><div class="room-name">'+esc(t('assemblyRoom').toUpperCase())+'</div><div class="room-name-sub">'+esc(currentLang==='th'?'ห้องประกอบ':'Assembly Room')+'</div></div></div>';
@@ -4054,7 +4070,7 @@ function renderIoLossChartRow(roomKey) {
     chartData = generateRoomIoDailyData(roomKey, view.monthIdx);
     tableRows = chartData;
     var mLabel = currentLang==='th' ? FACTORY_EFFICIENCY_REAL.monthNamesTh[view.monthIdx] : FACTORY_EFFICIENCY_REAL.monthNamesEn[view.monthIdx];
-    chartTitle = t('inputHr')+' – '+t('outputHr')+' · '+mLabel+' 2026 ('+(currentLang==='th'?'รายวัน':'daily')+')';
+    chartTitle = t('inputHr')+' – '+t('outputHr')+' · '+mLabel+' '+(DASHBOARD_STATE.selectedYear || new Date().getFullYear())+' ('+(currentLang==='th'?'รายวัน':'daily')+')';
   }
 
   // PHASE 4: the Efficiency sheet has per-room input/output for some
@@ -4068,9 +4084,11 @@ function renderIoLossChartRow(roomKey) {
   if (!plottable.length) {
     return '<div class="card hoverable"><div class="card-head-title">'
       + esc(t('inputHr')+' – '+t('outputHr')) + '</div>'
+      + (view.mode === 'month' ? '<button class="io-period-btn" data-io-back="'+roomKey+'">← '+esc(t('backToYear'))+'</button><div style="margin-top:10px;">'+esc(currentLang==='th'?'ยังไม่มีข้อมูลชั่วโมงรายวันจาก API สำหรับ '+monthKeyLabel(productionViewMonth(view.monthIdx)):'No daily hours returned by the API for '+monthKeyLabel(productionViewMonth(view.monthIdx)))+'</div>' : '')
       + renderNoData('noEffData') + '</div>';
   }
   chartData = plottable;
+  tableRows = tableRows.filter(function(r){ return r.input !== null || r.output !== null; });
 
   // Compute insight from the dataset currently shown
   var worst = chartData.reduce(function(a,b){ return b.eff < a.eff ? b : a; });
@@ -4107,9 +4125,9 @@ function renderIoLossChartRow(roomKey) {
     var rowClickAttr = view.mode==='year' ? ' data-io-month="'+roomKey+':'+r.monthIdx+'" style="cursor:pointer;"' : '';
     html += '<tr'+rowClickAttr+'>';
     html += '<td style="font-weight:800;color:'+accentColor+';">'+esc(r.label)+'</td>';
-    html += '<td class="mono-num">'+fmt(r.input)+'</td>';
-    html += '<td class="mono-num">'+fmt(r.output)+'</td>';
-    html += '<td class="mono-num" style="color:'+(r.eff>=targetPct?P.success:P.danger)+';font-weight:800;">'+r.eff+'%</td>';
+    html += '<td class="mono-num">'+(r.input === null ? '—' : fmt(r.input))+'</td>';
+    html += '<td class="mono-num">'+(r.output === null ? '—' : fmt(r.output))+'</td>';
+    html += '<td class="mono-num" style="color:'+(r.eff>=targetPct?P.success:P.danger)+';font-weight:800;">'+(r.eff === null ? '—' : r.eff+'%')+'</td>';
     html += '</tr>';
   });
   html += '</tbody></table></div>';
@@ -6105,6 +6123,8 @@ function attachContentHandlers() {
       var parts = el.getAttribute('data-io-month').split(':');
       var roomKey = parts[0], monthIdx = parseInt(parts[1], 10);
       ioChartView[roomKey] = { mode: 'month', monthIdx: monthIdx };
+      var key = productionViewMonth(monthIdx);
+      if (gsheetUrl && key !== DASHBOARD_STATE.selectedMonth) selectMonth(key);
       renderContent();
     });
   });
